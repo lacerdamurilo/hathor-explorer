@@ -5,145 +5,120 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import React from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import PropTypes from 'prop-types';
+import { find, get, isEmpty, last } from 'lodash';
+import { useHistory } from 'react-router-dom';
 import TokensTable from './TokensTable';
 import TokenSearchField from './TokenSearchField';
 import tokensApi from '../../api/tokensApi';
-import { get, last, find, isEmpty } from 'lodash';
 import PaginationURL from '../../utils/pagination';
-import { withRouter } from 'react-router-dom';
 import ErrorMessageWithIcon from '../error/ErrorMessageWithIcon';
-import helpers from '../../utils/helpers';
 
 /**
  * Displays custom tokens in a table with pagination buttons and a search bar.
  */
-class Tokens extends React.Component {
+function Tokens({ title, maintenanceMode }) {
+  const history = useHistory();
+
+  const [tokens, setTokens] = useState([]);
+  const [hasAfter, setHasAfter] = useState(false);
+  const [hasBefore, setHasBefore] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const [sortBy, setSortBy] = useState('transaction_timestamp');
+  const [order, setOrder] = useState('desc');
+  const [page, setPage] = useState(1);
+  const [pageSearchAfter, setPageSearchAfter] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSearchLoading, setIsSearchLoading] = useState(false);
+  const [calculatingPage, setCalculatingPage] = useState(false);
+  const [error, setError] = useState(false);
+
   /**
    * Structure that contains the attributes that will be part of the page URL
    */
-  pagination = new PaginationURL({
-    searchText: { required: false },
-    sortBy: { required: false },
-    order: { required: false },
-  });
+  const pagination = useRef(
+    new PaginationURL({
+      searchText: { required: false },
+      sortBy: { required: false },
+      order: { required: false },
+    })
+  );
 
-  constructor(props) {
-    super(props);
-
-    /**
-     * tokens: List of tokens currently being rendered.
-     *         Each token element must have the fields: id, name, symbol, nft, transaction_timestamp, and sort.
-     *         id, name, symbol are strings; nft is boolean; transaction_timestamp is long.
-     *         Sort is an array with two strings, The value is given by ElasticSearch and it is passed back when we want to change page
-     * hasAfter: Indicates if a next page exists
-     * hasBefore: Indicates if a previous page exists
-     * searchText: Input text written by user
-     * sortBy: Which field to sort (uid, name, symbol)
-     * order: If sorted field must be ordered asc or desc
-     * page: Current page. Used to know if there is a previous page
-     * pageSearchAfter: Calculates the searchAfter param that needs to be passed to explorer-service in order to get the next/previous page.
-     *                  We use this array to store already-calculated values,
-     *                  so we do not need to recalculate them if user is requesting an already-navigated page.
-     * loading: Initial loading, when user clicks on the Tokens navigation item
-     * isSearchLoading: Indicates if search results are being retrieved from explorer-service
-     * calculatingPage: Indicates if next page is being retrieved from explorer-service
-     * error: Indicates if an unexpected error happened when calling the explorer-service
-     * maintenanceMode: Indicates if explorer-service or its downstream services are experiencing problems. If so, maintenance mode will be enabled on
-     *                  our feature toggle service (Unleash) to remove additional load until the team fixes the problem
-     */
-    this.state = {
-      tokens: [],
-      hasAfter: false,
-      hasBefore: false,
-      searchText: '',
-      sortBy: 'transaction_timestamp',
-      order: 'desc',
-      page: 1,
-      pageSearchAfter: [],
-      loading: false,
-      isSearchLoading: false,
-      calculatingPage: false,
-      error: false,
-      maintenanceMode: this.props.maintenanceMode,
-    };
-  }
-
-  componentDidMount = async () => {
-    if (this.state.maintenanceMode) {
+  useEffect(() => {
+    // Abort this effect if the screen was called in maintenance mode
+    if (maintenanceMode) {
       return;
     }
 
-    // 'Click' on search to make the first query
-    const queryParams = this.pagination.obtainQueryParams();
+    // Fetches query parameters from url
+    const queryParams = pagination.current.obtainQueryParams();
 
-    await helpers.setStateAsync(this, {
-      searchText: get(queryParams, 'searchText', this.state.searchText),
-      sortBy: get(queryParams, 'sortBy', this.state.sortBy),
-      order: get(queryParams, 'order', this.state.order),
-      loading: true,
-    });
+    setSearchText(get(queryParams, 'searchText', ''));
+    setSortBy(get(queryParams, 'sortBy', ''));
+    setOrder(get(queryParams, 'order', ''));
+    setIsLoading(false);
 
-    await this.onSearchButtonClicked();
-
-    this.setState({
-      loading: false,
-    });
-  };
+    setIsSearchLoading(true); // Triggers the initial search query
+  }, [maintenanceMode]);
 
   /**
    *
    * Call explorer-service to get list of tokens according to the search criteria
    *
    * @param {*} searchAfter Parameter needed by ElasticSearch for pagination purposes
+   * @param {string} newSearchText
+   * @param {string} newSortBy
+   * @param {string} newOrder
    * @returns tokens
    */
-  getTokens = async searchAfter => {
-    const tokensRequest = await tokensApi.getList(
-      this.state.searchText,
-      this.state.sortBy,
-      this.state.order,
-      searchAfter
-    );
+  const getTokens = useCallback(async (searchAfter, newSearchText, newSortBy, newOrder) => {
+    const tokensRequest = await tokensApi.getList(newSearchText, newSortBy, newOrder, searchAfter);
 
-    this.setState({
-      error: get(tokensRequest, 'error', false),
-    });
+    setError(get(tokensRequest, 'error', false));
 
-    const tokens = get(tokensRequest, 'data', { hits: [], has_next: false });
-    tokens.hits = tokens.hits.map(token => ({
+    const apiTokens = get(tokensRequest, 'data', { hits: [], has_next: false });
+    apiTokens.hits = apiTokens.hits.map(token => ({
       ...token,
       uid: token.id,
       nft: get(token, 'nft', false),
     }));
-    return tokens;
-  };
+    return apiTokens;
+  }, []);
+
+  // Identify a state flag to start executing the main search query
+  useEffect(() => {
+    // The `isSearchLoading` state variable is used as a flag to trigger this effect and execute the query
+    if (!isSearchLoading) {
+      return;
+    }
+
+    // Update the URL every time the state changes, so user can share the results of a search
+    const newURL = pagination.current.setURLParameters({
+      searchText: searchText || '',
+      sortBy: sortBy || '',
+      order: order || '',
+    });
+
+    history.push(newURL);
+
+    getTokens([], searchText, sortBy, order).then(apiTokens => {
+      setIsSearchLoading(false);
+
+      // When search button is clicked, results return to the first page
+      setPage(1);
+      setTokens(apiTokens.hits);
+      setHasAfter(apiTokens.has_next);
+      setHasBefore(false);
+      setPageSearchAfter([{ page: 1, searchAfter: [] }]);
+    });
+  }, [isSearchLoading, searchText, sortBy, order, getTokens, history]);
 
   /**
    * Process events when user clicks on search button
    */
-  onSearchButtonClicked = async () => {
-    this.setState({ isSearchLoading: true });
-    const tokens = await this.getTokens([]);
-
-    //When search button is clicked, results return to the first page
-    this.setState({
-      isSearchLoading: false,
-      page: 1,
-      tokens: tokens.hits,
-      hasAfter: tokens.has_next,
-      hasBefore: false,
-      pageSearchAfter: [
-        {
-          page: 1,
-          searchAfter: [],
-        },
-      ],
-    });
-
-    // This is ultimately called when search text, sort, or sort order changes
-    this.updateURL();
+  const onSearchButtonClicked = () => {
+    setIsSearchLoading(true);
   };
 
   /**
@@ -151,8 +126,8 @@ class Tokens extends React.Component {
    *
    * @param {*} event
    */
-  onSearchTextChanged = event => {
-    this.setState({ searchText: event.target.value });
+  const onSearchTextChanged = event => {
+    setSearchText(event.target.value);
   };
 
   /**
@@ -160,159 +135,137 @@ class Tokens extends React.Component {
    *
    * @param {*} event
    */
-  onSearchTextKeyUp = event => {
+  const onSearchTextKeyUp = event => {
     if (event.key === 'Enter') {
-      this.onSearchButtonClicked();
+      setIsSearchLoading(true);
     }
-  };
-
-  /**
-   * Update the URL, so user can share the results of a search
-   */
-  updateURL = () => {
-    const newURL = this.pagination.setURLParameters({
-      searchText: this.state.searchText,
-      sortBy: this.state.sortBy,
-      order: this.state.order,
-    });
-
-    this.props.history.push(newURL);
   };
 
   /**
    * Process events when next page is requested by user
    *
-   * @param {*} event
+   * @param {*} _event
    */
-  nextPageClicked = async event => {
-    this.setState({ calculatingPage: true });
+  const nextPageClicked = async _event => {
+    setCalculatingPage(true);
 
-    const nextPage = this.state.page + 1;
-    let searchAfter = get(find(this.state.pageSearchAfter, { page: nextPage }), 'searchAfter', []);
+    const nextPage = page + 1;
+    let searchAfter = get(find(pageSearchAfter, { page: nextPage }), 'searchAfter', []);
 
     // Calculate searchAfter of next page if not already calculated
     if (isEmpty(searchAfter)) {
-      const lastCurrentTokenSort = get(last(this.state.tokens), 'sort', []);
+      const lastCurrentTokenSort = get(last(tokens), 'sort', []);
 
       const newEntry = {
         page: nextPage,
         searchAfter: lastCurrentTokenSort,
       };
 
-      this.setState({
-        pageSearchAfter: [...this.state.pageSearchAfter, newEntry],
-      });
+      setPageSearchAfter([...pageSearchAfter, newEntry]);
 
       searchAfter = lastCurrentTokenSort;
     }
 
-    const tokens = await this.getTokens(searchAfter);
+    const gottenTokens = await getTokens(searchAfter, searchText, sortBy, order);
 
-    this.setState({
-      tokens: tokens.hits,
-      hasAfter: tokens.has_next,
-      hasBefore: true,
-      page: nextPage,
-      calculatingPage: false,
-    });
+    setTokens(gottenTokens.hits);
+    setHasAfter(gottenTokens.has_next);
+    setHasBefore(true);
+    setPage(nextPage);
+    setCalculatingPage(false);
   };
 
   /**
    * Process events when previous page is requested by user
    *
-   * @param {*} event
+   * @param {*} _event
    */
-  previousPageClicked = async event => {
-    this.setState({ calculatingPage: true });
+  const previousPageClicked = async _event => {
+    setCalculatingPage(true);
 
-    const previousPage = this.state.page - 1;
-    const searchAfter = get(
-      find(this.state.pageSearchAfter, { page: previousPage }),
-      'searchAfter',
-      []
-    );
-    const tokens = await this.getTokens(searchAfter);
+    const previousPage = page - 1;
+    const searchAfter = get(find(pageSearchAfter, { page: previousPage }), 'searchAfter', []);
+    const gottenTokens = await getTokens(searchAfter, searchText, sortBy, order);
 
-    this.setState({
-      tokens: tokens.hits,
-      hasAfter: true,
-      hasBefore: previousPage === 1 ? false : true,
-      page: previousPage,
-      calculatingPage: false,
-    });
+    setTokens(gottenTokens.hits);
+    setHasAfter(true);
+    setHasBefore(previousPage !== 1);
+    setPage(previousPage);
+    setCalculatingPage(false);
   };
 
   /**
    * Process table header click. This indicates that user wants data to be sorted by a determined field
    *
    * @param {*} event
-   * @param {*} header
+   * @param {*} headerName
    */
-  tableHeaderClicked = async (event, header) => {
-    if (header === this.state.sortBy) {
-      await helpers.setStateAsync(this, { order: this.state.order === 'asc' ? 'desc' : 'asc' });
+  const tableHeaderClicked = async (event, headerName) => {
+    let newOrder;
+    if (headerName === sortBy) {
+      newOrder = order === 'asc' ? 'desc' : 'asc';
     } else {
-      await helpers.setStateAsync(this, { sortBy: header, order: 'asc' });
+      setSortBy(headerName);
+      newOrder = 'asc';
     }
+    setOrder(newOrder);
 
-    await this.onSearchButtonClicked();
+    setIsSearchLoading(true);
   };
 
-  render() {
-    const renderSearchField = () => {
-      if (this.state.maintenanceMode) {
-        return (
-          <ErrorMessageWithIcon message="This feature is under maintenance. Please try again after some time" />
-        );
-      }
-
+  const renderSearchField = () => {
+    if (maintenanceMode) {
       return (
-        <TokenSearchField
-          onSearchButtonClicked={this.onSearchButtonClicked}
-          onSearchTextChanged={this.onSearchTextChanged}
-          searchText={this.state.searchText}
-          onSearchTextKeyUp={this.onSearchTextKeyUp}
-          isSearchLoading={this.state.isSearchLoading}
-          loading={this.state.loading}
-        />
+        <ErrorMessageWithIcon message="This feature is under maintenance. Please try again after some time" />
       );
-    };
-
-    const renderTokensTable = () => {
-      if (this.state.maintenanceMode) {
-        return null;
-      }
-
-      if (this.state.error) {
-        return <ErrorMessageWithIcon message="Error loading tokens. Please try again." />;
-      }
-
-      return (
-        <TokensTable
-          data={this.state.tokens}
-          hasBefore={this.state.hasBefore}
-          hasAfter={this.state.hasAfter}
-          onNextPageClicked={this.nextPageClicked}
-          onPreviousPageClicked={this.previousPageClicked}
-          loading={this.state.loading}
-          sortBy={this.state.sortBy}
-          order={this.state.order}
-          tableHeaderClicked={this.tableHeaderClicked}
-          calculatingPage={this.state.calculatingPage}
-        />
-      );
-    };
+    }
 
     return (
-      <div className="w-100">
-        <div className="col-12">
-          <h1>{this.props.title}</h1>
-        </div>
-        {renderSearchField()}
-        {renderTokensTable()}
-      </div>
+      <TokenSearchField
+        onSearchButtonClicked={onSearchButtonClicked}
+        onSearchTextChanged={onSearchTextChanged}
+        searchText={searchText}
+        onSearchTextKeyUp={onSearchTextKeyUp}
+        isSearchLoading={isSearchLoading}
+        loading={isLoading}
+      />
     );
-  }
+  };
+
+  const renderTokensTable = () => {
+    if (maintenanceMode) {
+      return null;
+    }
+
+    if (error) {
+      return <ErrorMessageWithIcon message="Error loading tokens. Please try again." />;
+    }
+
+    return (
+      <TokensTable
+        data={tokens}
+        hasBefore={hasBefore}
+        hasAfter={hasAfter}
+        onNextPageClicked={nextPageClicked}
+        onPreviousPageClicked={previousPageClicked}
+        loading={isLoading}
+        sortBy={sortBy}
+        order={order}
+        tableHeaderClicked={tableHeaderClicked}
+        calculatingPage={calculatingPage}
+      />
+    );
+  };
+
+  return (
+    <div className="w-100">
+      <div className="col-12">
+        <h1>{title}</h1>
+      </div>
+      {renderSearchField()}
+      {renderTokensTable()}
+    </div>
+  );
 }
 
 /**
@@ -324,4 +277,4 @@ Tokens.propTypes = {
   maintenanceMode: PropTypes.bool.isRequired,
 };
 
-export default withRouter(Tokens);
+export default Tokens;
