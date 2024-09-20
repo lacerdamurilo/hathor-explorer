@@ -15,7 +15,7 @@ function PeerAdmin() {
 
   return (
     <div className="content-wrapper">
-      <Network history={history} match={params} />
+      <Network history={history} match={params || {}} />
     </div>
   );
 }
